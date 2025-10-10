@@ -45,7 +45,7 @@
   LTO w Type info 00 03   has 255 blocks.
   LTO w Type info 00 xx   has NN blocks.
 */
-#define CM_MEM_MAX_SIZE 0x1FE0  // (32byte/block * 255block = 8160byte)
+#define CM_MEM_MAX_SIZE 0x7FE0  // (32byte/block * 1023block = 32736byte)
 
 // todo: vendor mapping table..
 
@@ -201,30 +201,23 @@ static int lto_rdbl(uint8_t blk, uint8_t *block_response, uint8_t *block_cnt_res
     return PM3_SUCCESS;
 }
 
-/*
 static int lto_rdbl_ext(uint16_t blk, uint8_t *block_response, uint8_t *block_cnt_response, bool verbose) {
-
-    if (blk && 0x) {
-        blk &= 0xFE;
-    }
-
     uint16_t resp_len = 18;
-    uint8_t rdbl_ext_cmd[] = {0x21 , blk & 0xFF, (blk >> 8) & 0xFF};
+    uint8_t rdbl_ext_cmd[] = {0x21, blk & 0xFF, (blk >> 8) & 0xFF};
     uint8_t rdbl_cnt_cmd[] = {0x80};
 
     int status = lto_send_cmd_raw(rdbl_ext_cmd, sizeof(rdbl_ext_cmd), block_response, &resp_len, true, false, verbose);
     if (status == PM3_ETIMEOUT || status == PM3_ESOFT) {
-        return PM3_EWRONGANSWER; // READ BLOCK failed
+        return PM3_EWRONGANSWER;  // READ BLOCK failed
     }
 
     status = lto_send_cmd_raw(rdbl_cnt_cmd, sizeof(rdbl_cnt_cmd), block_cnt_response, &resp_len, false, false, verbose);
     if (status == PM3_ETIMEOUT || status == PM3_ESOFT) {
-        return PM3_EWRONGANSWER; // READ BLOCK CONTINUE failed
+        return PM3_EWRONGANSWER;  // READ BLOCK CONTINUE failed
     }
 
     return PM3_SUCCESS;
 }
-*/
 
 static int CmdHfLTOInfo(const char *Cmd) {
     CLIParserContext *ctx;
@@ -238,19 +231,6 @@ static int CmdHfLTOInfo(const char *Cmd) {
     CLIExecWithReturn(ctx, Cmd, argtable, true);
     CLIParserFree(ctx);
     return infoLTO(true);
-}
-
-static const char *lto_print_size(uint8_t ti) {
-    switch (ti) {
-        case 1:
-            return "101 blocks / 3232 bytes";
-        case 2:
-            return "95 blocks / 3040 bytes";
-        case 3:
-            return "255 blocks / 8160 bytes";
-        default:
-            return "unknown";
-    }
 }
 
 static void lto_print_ci(uint8_t *d) {
@@ -458,10 +438,10 @@ int infoLTO(bool verbose) {
         PrintAndLogEx(INFO, "--- " _CYAN_("Tag Information") " ---------------------------");
         PrintAndLogEx(INFO, "UID......... " _YELLOW_("%s"), sprint_hex_inrow(serial_number, sizeof(serial_number)));
         PrintAndLogEx(INFO, "Type info... " _YELLOW_("%s"), sprint_hex_inrow(type_info, sizeof(type_info)));
-        PrintAndLogEx(INFO, "Memory...... " _YELLOW_("%s"), lto_print_size(type_info[1]));
-        if (type_info[1] > 3) {
-            PrintAndLogEx(INFO, "Unknown LTO tag, report to @iceman!");
-        }
+        // PrintAndLogEx(INFO, "Memory...... " _YELLOW_("%d blocks / %d bytes"), lto_get_page_len(type_info[1]), lto_get_page_len(type_info[1]) * 32);
+        // if (type_info[1] > 3) {
+        //     PrintAndLogEx(INFO, "Unknown LTO tag, report to @iceman!");
+        // }
 
         PrintAndLogEx(NORMAL, "");
         PrintAndLogEx(INFO, "--- " _CYAN_("LTO Cartridge Information") " -----------------");
@@ -517,7 +497,7 @@ static int CmdHfLTOList(const char *Cmd) {
     return CmdTraceListAlias(Cmd, "hf lto", "lto -c");
 }
 
-int rdblLTO(uint8_t st_blk, uint8_t end_blk, bool verbose) {
+int rdblLTO(uint16_t st_blk, uint16_t end_blk, bool verbose) {
     clearCommandBuffer();
     lto_switch_on_field();
 
@@ -535,9 +515,12 @@ int rdblLTO(uint8_t st_blk, uint8_t end_blk, bool verbose) {
     uint8_t block_data_d16_d31[18];
     uint8_t block_data[32];
 
-    for (uint8_t i = st_blk; i < end_blk + 1; i++) {
-        ret_val = lto_rdbl(i, block_data_d00_d15, block_data_d16_d31, verbose);
-
+    for (uint16_t i = st_blk; i < end_blk + 1; i++) {
+        if (i < 255) {
+            ret_val = lto_rdbl(i, block_data_d00_d15, block_data_d16_d31, verbose);
+        } else {
+            ret_val = lto_rdbl_ext(i, block_data_d00_d15, block_data_d16_d31, verbose);
+        }
         if (ret_val == PM3_SUCCESS) {
             memcpy(block_data, block_data_d00_d15, 16);
             memcpy(block_data + 16, block_data_d16_d31, 16);
@@ -556,7 +539,7 @@ static int CmdHfLTOReadBlock(const char *Cmd) {
     CLIParserContext *ctx;
     CLIParserInit(&ctx, "hf lto rdbl",
                   "Reead blocks from LTO tag",
-                  "hf lto rdbl --first 0 --last 254");
+                  "hf lto rdbl --first 0 --last 1022");
 
     void *argtable[] = {
         arg_param_begin,
@@ -566,7 +549,7 @@ static int CmdHfLTOReadBlock(const char *Cmd) {
     CLIExecWithReturn(ctx, Cmd, argtable, true);
 
     int startblock = arg_get_int_def(ctx, 1, 0);
-    int endblock = arg_get_int_def(ctx, 2, 254);
+    int endblock = arg_get_int_def(ctx, 2, 1022);
 
     CLIParserFree(ctx);
 
@@ -668,7 +651,7 @@ static int CmdHfLTOWriteBlock(const char *Cmd) {
     return res;
 }
 
-int dumpLTO(uint8_t *dump, bool verbose) {
+int dumpLTO(uint8_t *dump, uint16_t *blocks_read, bool verbose) {
     clearCommandBuffer();
     lto_switch_on_field();
 
@@ -681,23 +664,28 @@ int dumpLTO(uint8_t *dump, bool verbose) {
         lto_switch_off_field();
         return ret_val;
     }
-    // 0003 == 255 blocks x 32 = 8160 bytes
-    // 0002 ==  95 blocks x 32 = 3040 bytes
-    // 0001 == 101 blocks x 32 = 3232 bytes
-    uint8_t blocks = 0xFF;
-    if (type_info[1] == 0x01) {
-        blocks = 0x65;
-    } else if (type_info[1] == 0x02) {
-        blocks = 0x5F;
-    }
-    PrintAndLogEx(SUCCESS, "Found LTO tag w " _YELLOW_("%s") " memory", lto_print_size(type_info[1]));
 
+    // read block 0
     uint8_t block_data_d00_d15[18];
     uint8_t block_data_d16_d31[18];
+    ret_val = lto_rdbl(0, block_data_d00_d15, block_data_d16_d31, verbose);
+    if (ret_val != PM3_SUCCESS) {
+        lto_switch_off_field();
+        return ret_val;
+    }
 
-    for (uint8_t i = 0; i < blocks; i++) {
-        ret_val = lto_rdbl(i, block_data_d00_d15, block_data_d16_d31, verbose);
+    uint16_t blocks = block_data_d00_d15[5] * 32;
+    if (blocks > 128) blocks--;
+    PrintAndLogEx(SUCCESS, "Total %02d blocks", blocks);
+    PrintAndLogEx(SUCCESS, "Found LTO tag w " _YELLOW_("%d bytes") " memory", blocks * 32);
 
+    for (uint16_t i = 0; i < blocks; i++) {
+        PrintAndLogEx(INPLACE, "...reading block %d", i);
+        if (i < 255) {
+            ret_val = lto_rdbl(i, block_data_d00_d15, block_data_d16_d31, verbose);
+        } else {
+            ret_val = lto_rdbl_ext(i, block_data_d00_d15, block_data_d16_d31, verbose);
+        }
         if (ret_val == PM3_SUCCESS) {
             // remove CRCs
             memcpy(dump + i * 32, block_data_d00_d15, 16);
@@ -706,10 +694,9 @@ int dumpLTO(uint8_t *dump, bool verbose) {
             lto_switch_off_field();
             return ret_val;
         }
-        PrintAndLogEx(INPLACE, "...reading block %d", i);
         fflush(stdout);
     }
-
+    *blocks_read = blocks;
     lto_switch_off_field();
     return ret_val;
 }
@@ -738,7 +725,8 @@ static int CmdHfLTODump(const char *Cmd) {
         return PM3_EMALLOC;
     }
 
-    int ret_val = dumpLTO(dump, true);
+    uint16_t blocks_read = 0;
+    int ret_val = dumpLTO(dump, &blocks_read, true);
     PrintAndLogEx(NORMAL, "");
     if (ret_val != PM3_SUCCESS) {
         free(dump);
@@ -749,7 +737,8 @@ static int CmdHfLTODump(const char *Cmd) {
         char *fptr = filename + snprintf(filename, sizeof(filename), "hf-lto-");
         FillFileNameByUID(fptr, dump, "-dump", 5);
     }
-    pm3_save_dump(filename, dump, dump_len, jsfLto);
+
+    pm3_save_dump(filename, dump, blocks_read * 32, jsfLto);
     free(dump);
     return PM3_SUCCESS;
 }

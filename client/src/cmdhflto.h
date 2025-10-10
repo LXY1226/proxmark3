@@ -23,9 +23,9 @@
 
 int reader_lto(bool loop, bool verbose);
 int infoLTO(bool verbose);
-int dumpLTO(uint8_t *dump, bool verbose);
+int dumpLTO(uint8_t *dump, uint16_t *blocks_read, bool verbose);
 int restoreLTO(uint8_t *dump, bool verbose);
-int rdblLTO(uint8_t st_blk, uint8_t end_blk, bool verbose);
+int rdblLTO(uint16_t st_blk, uint16_t end_blk, bool verbose);
 int wrblLTO(uint8_t blk, uint8_t *data, bool verbose);
 int CmdHFLTO(const char *Cmd);
 
