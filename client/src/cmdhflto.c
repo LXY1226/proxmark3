@@ -72,11 +72,12 @@ static const cm_page_t cm_page_map[] = {
     {0x10A, 64,   "Usage Information 2",                  ""                                                                                               },
     {0x10B, 64,   "Usage Information 3",                  ""                                                                                               },
     {0x200, 1056, "Application Specific",                 ""                                                                                               },
+    {0x701, 0x40, "CM Header",                            ""                                                                                               },
     {0xFFC, 0,    "Pad",                                  "Used to reserve space for future Pages, and to align some Pages to 16-byte / 32-byte boundaries"},
     {0xFFD, 0,    "Defect",                               "Used to indicate that the LTO CM contains defective memory locations in that area"              },
     {0xFFE, 0,    "Empty",                                "Indicates an empty table"                                                                       },
-    {0xFFF, 0,    "EOPT",                                 "End Of Page Table"                                                                              },
-    {0x000, 0,    "no page info available",               ""                                                                                               }  // must be the last entry
+    {0xFFF, 0,    "End Of Page Table",                    "End Of Page Table"                                                                              },
+    {0x000, 0,    "unknown page",                         ""                                                                                               }  // must be the last entry
 };
 
 /*
@@ -227,124 +228,48 @@ static int CmdHfLTOInfo(const char *Cmd) {
 
     void *argtable[] = {
         arg_param_begin,
+        arg_lit0("@", NULL, "optional - continuous reader mode"),
         arg_param_end};
     CLIExecWithReturn(ctx, Cmd, argtable, true);
+    bool cm = arg_get_lit(ctx, 1);
     CLIParserFree(ctx);
-    return infoLTO(true);
-}
+    if (!cm) return infoLTO(true);
 
-static void lto_print_ci(uint8_t *d) {
-    uint32_t sn = (bytes_to_num(d, 4) & 0x0FFFFFFF);
-    PrintAndLogEx(INFO, "CM Serial number... " _YELLOW_("%u"), sn);
-    PrintAndLogEx(INFO, "Manufacture Id..... " _YELLOW_("%u"), (d[3] >> 4));
-    PrintAndLogEx(INFO, "CM Size............ " _YELLOW_("%u") " ( 1024 x %u bytes )", d[5], d[5]);
-    PrintAndLogEx(INFO, "Type............... " _YELLOW_("%s"), sprint_hex_inrow(d + 6, 2));
-    PrintAndLogEx(INFO, "Manufacture info... " _YELLOW_("%s"), sprint_hex_inrow(d + 8, 24));
-}
+    int ret = PM3_SUCCESS;
+    uint8_t last_serial[5] = {0};
+    do {
+        uint8_t serial[5] = {0};
+        uint8_t serial_len = sizeof(serial);
+        uint8_t type_info[2] = {0};
 
-static void lto_print_cmwi(uint8_t *d) {
-    PrintAndLogEx(NORMAL, "");
-    PrintAndLogEx(INFO, "--- " _CYAN_("LTO CM Write-Inhibit") " --------------------------");
-    PrintAndLogEx(INFO, "Raw");
-    PrintAndLogEx(INFO, "   " _YELLOW_("%s"), sprint_hex_inrow(d, 4));
-    PrintAndLogEx(INFO, "Last write-inhibited block#... " _YELLOW_("%u"), d[0]);
-    PrintAndLogEx(INFO, "Block 1 protected flag........ %s", (d[1] == 0) ? _GREEN_("uninitialised cartridge") : (d[1] == 1) ? "initialised cartridge"
-                                                                                                                            : "n/a");
-    PrintAndLogEx(INFO, "Reserved for future use....... " _YELLOW_("%s"), sprint_hex_inrow(d + 2, 2));
-}
+        lto_switch_off_field();
+        lto_switch_on_field();
+        clearCommandBuffer();
 
-static void lto_print_cmpt(uint8_t *d) {
-    // Block Address:    B0 = integer part of [ (start address + offset) ÷ 32 ]
-    // Word Address:    w = mod(start address + offset, 32 ) ÷ 2
+        ret = lto_select(serial, serial_len, type_info, false);
+        if (ret != PM3_SUCCESS) {
+            continue;
+        }
 
-    PrintAndLogEx(NORMAL, "");
-    PrintAndLogEx(INFO, "--- " _CYAN_("Page Descriptor Table") " ----------------------------------------");
-    PrintAndLogEx(INFO, "Raw");
-    PrintAndLogEx(INFO, "   " _YELLOW_("%s"), sprint_hex_inrow(d, 28));
-    PrintAndLogEx(INFO, "                                                   ^^^^^^^^ CRC-32");
-    PrintAndLogEx(INFO, "------------------------------------------------------------------");
-    PrintAndLogEx(INFO, "                 start ");
-    PrintAndLogEx(INFO, " # | ver | id  | address | name ");
-    PrintAndLogEx(INFO, "---+-----+-----+---------+----------------------------------------");
+        if (ret == PM3_SUCCESS &&
+            serial[0] != last_serial[0] &&
+            serial[1] != last_serial[1] &&
+            serial[2] != last_serial[2] &&
+            serial[3] != last_serial[3] &&
+            serial[4] != last_serial[4]) {
+            lto_switch_off_field();
+            ret = infoLTO(true);
+            if (ret == PM3_SUCCESS) {
+                last_serial[0] = serial[0];
+                last_serial[1] = serial[1];
+                last_serial[2] = serial[2];
+                last_serial[3] = serial[3];
+                last_serial[4] = serial[4];
+            }
+        }
 
-    uint8_t p = 0;
-    for (uint8_t i = 0; i < 24; i += 4) {
-        uint8_t page_vs = d[i] >> 4;
-        uint16_t page_id = ((d[i] & 0x0F) << 8) | d[i + 1];
-        uint16_t sa = (d[i + 2] << 8 | d[i + 3]);
-        PrintAndLogEx(INFO, " %u |  %u  | %03x | 0x%04X  | %s", p, page_vs, page_id, sa, get_page_name(page_id));
-        p++;
-    }
-    PrintAndLogEx(INFO, "---+-----+-----+---------+----------------------------------------");
-    PrintAndLogEx(INFO, "# Pages found...  %u", p);
-}
-
-static void lto_print_cmi(uint8_t *d) {
-    uint16_t page_id = (d[0] << 8) | d[1];
-    uint16_t page_len = (d[2] << 8) | d[3];
-
-    char man[8 + 1];
-    memcpy(man, (char *)d + 4, 8);
-
-    char serial[10 + 1];
-    memcpy(serial, (char *)d + 12, 10);
-
-    uint16_t cart_type = (d[22] << 8) | d[23];
-    char dom[8 + 1];
-    memcpy(dom, (char *)d + 24, 8);
-
-    uint16_t tape_len = (d[32] << 8) | d[33];
-    uint16_t tape_thick = (d[34] << 8) | d[35];
-    uint16_t empty_reel = (d[36] << 8) | d[37];
-    uint16_t hub_radius = (d[38] << 8) | d[39];
-    uint16_t full_reel = (d[40] << 8) | d[41];
-    uint16_t max_media_speed = (d[42] << 8) | d[43];
-    char lic[4 + 1];
-    memcpy(lic, (char *)d + 44, 4);
-
-    char cmuse[12 + 1];
-    memcpy(cmuse, (char *)d + 48, 12);
-
-    //    uint32_t crc = bytes_to_num(d+60, 4);
-
-    PrintAndLogEx(NORMAL, "");
-    PrintAndLogEx(INFO, "--- " _CYAN_("Cartridge Manufacturer's information") " --------------------------");
-    PrintAndLogEx(INFO, "Raw");
-    PrintAndLogEx(INFO, "   " _YELLOW_("%s"), sprint_hex_inrow(d, 32));
-    PrintAndLogEx(INFO, "   " _YELLOW_("%s"), sprint_hex_inrow(d + 32, 32));
-    PrintAndLogEx(INFO, "                                                           ^^^^^^^^ CRC-32");
-    PrintAndLogEx(INFO, "Page id.................. ..." _YELLOW_("0x%04x"), page_id);
-    PrintAndLogEx(INFO, "Page len.................... " _YELLOW_("%u"), page_len);
-    PrintAndLogEx(INFO, "Cartridge Manufacturer...... " _YELLOW_("%s"), man);
-    PrintAndLogEx(INFO, "Serial number............... " _YELLOW_("%s"), serial);
-    PrintAndLogEx(INFO, "Cartridge type.............. " _YELLOW_("0x%02x"), cart_type);
-    PrintAndLogEx(INFO, "Date of manufacture......... " _YELLOW_("%s"), dom);
-    PrintAndLogEx(INFO, "Tape len.................... " _YELLOW_("%u"), tape_len);
-    PrintAndLogEx(INFO, "Tape thickness.............. " _YELLOW_("%u"), tape_thick);
-    PrintAndLogEx(INFO, "Empty reel inertia.......... " _YELLOW_("%u") " %s", empty_reel, (empty_reel == 7270) ? "( def )" : "");
-    PrintAndLogEx(INFO, "Hub radius.................. " _YELLOW_("%u") " %s", hub_radius, (hub_radius == 22528) ? "( def )" : "");
-    PrintAndLogEx(INFO, "Full reel pack radius....... " _YELLOW_("%u") " / 0x%04x", full_reel, full_reel);
-    PrintAndLogEx(INFO, "Maximum media speed......... " _YELLOW_("%u"), max_media_speed);
-    PrintAndLogEx(INFO, "License code................ " _YELLOW_("%s"), lic);
-    PrintAndLogEx(INFO, "Cartridge manufacture use... " _YELLOW_("%s"), cmuse);
-}
-
-static void lto_print_mmi(uint8_t *d) {
-    PrintAndLogEx(NORMAL, "");
-    PrintAndLogEx(INFO, "--- " _CYAN_("Media Manufacturer's information") " --------------------------");
-    PrintAndLogEx(INFO, "Raw");
-    PrintAndLogEx(INFO, "   " _YELLOW_("%s"), sprint_hex_inrow(d, 32));
-    PrintAndLogEx(INFO, "   " _YELLOW_("%s"), sprint_hex_inrow(d + 32, 32));
-    PrintAndLogEx(INFO, "                                                           ^^^^^^^^ CRC-32");
-
-    uint16_t page_id = (d[0] << 8) | d[1];
-    uint16_t page_len = (d[2] << 8) | d[3];
-
-    char man[48 + 1];
-    memcpy(man, (char *)d + 4, 48);
-    PrintAndLogEx(INFO, "Page id.................... " _YELLOW_("0x%04x"), page_id);
-    PrintAndLogEx(INFO, "Page len................... " _YELLOW_("%u"), page_len);
-    PrintAndLogEx(INFO, "Servowriter Manufacturer... " _YELLOW_("%s"), man);
+    } while (kbd_enter_pressed() == false);
+    return PM3_SUCCESS;
 }
 
 // common pages
@@ -415,6 +340,56 @@ int reader_lto(bool loop, bool verbose) {
     return ret;
 }
 
+typedef struct lto_info_s {
+    char *Format;
+    uint32_t nWraps, setsPerWrap, tapeDirLength, kBPerDataSet, TapeLife;
+} lto_info_t;
+
+static lto_info_t lto_info_table[] = {
+    {"UNKNOWN"},
+    /* at_Offset = {24, 28, 36, 44, 48, 52, 54, 56, 58} */
+    {"LTO-1", 48, 5500, 16, 404, 260},
+    {"LTO-2", 64, 8200, 28, 404, 260},
+    {"LTO-3", 44, 6000, 32, 1617, 260},
+    {"LTO-4", 56, 9500, 32, 1590, 260},
+    /* at_Offset = {32, 36, 44, 52, 56, 60, 62, 64, 66, 80} */
+    {"LTO-5", 80, 7800, 32, 2473, 260},
+    {"LTO-6", 136, 7805, 32, 2473, 130},
+    {"LTO-7", 112, 10950, 32, 5032, 130},
+    {"LTO-8", 208, 11660, 32, 5032, 75},
+    {"LTO-9", 280, 6770, 32, 9806, 55},
+    {"Cleaning Tape"}
+};
+
+static uint8_t lto_get_info_by_type(uint16_t type) {
+    if ((type >> 15 & 1) == 1) {
+        return ARRAYLEN(lto_info_table) - 1;  // Cleaning Tape
+    }
+    switch (type) {
+        case 1:
+            return 1;  // LTO-1
+        case 2:
+            return 2;  // LTO-2
+        case 0b100:
+            return 3;  // LTO-3
+        case 0b1000:
+            return 4;  // LTO-4
+        case 0b10000:
+            return 5;  // LTO-5
+        case 0b100000:
+            return 6;  // LTO-6
+        case 0b1000000:
+            return 7;  // LTO-7
+            // TODO LTO-7 Type-M
+        case 0b10000000:
+            return 8;  // LTO-8
+        case 0b10000001:
+            return 9;  // LTO-9
+        default:
+            return 10;
+    }
+}
+
 int infoLTO(bool verbose) {
     clearCommandBuffer();
     lto_switch_on_field();
@@ -433,62 +408,294 @@ int infoLTO(bool verbose) {
         return ret_val;
     }
 
-    if (ret_val == PM3_SUCCESS) {
+    while (ret_val == PM3_SUCCESS) {
         PrintAndLogEx(NORMAL, "");
-        PrintAndLogEx(INFO, "--- " _CYAN_("Tag Information") " ---------------------------");
+        PrintAndLogEx(INFO, "--- " _CYAN_("Tag Information") " -------------------------------------");
         PrintAndLogEx(INFO, "UID......... " _YELLOW_("%s"), sprint_hex_inrow(serial_number, sizeof(serial_number)));
         PrintAndLogEx(INFO, "Type info... " _YELLOW_("%s"), sprint_hex_inrow(type_info, sizeof(type_info)));
-        // PrintAndLogEx(INFO, "Memory...... " _YELLOW_("%d blocks / %d bytes"), lto_get_page_len(type_info[1]), lto_get_page_len(type_info[1]) * 32);
-        // if (type_info[1] > 3) {
-        //     PrintAndLogEx(INFO, "Unknown LTO tag, report to @iceman!");
-        // }
 
-        PrintAndLogEx(NORMAL, "");
-        PrintAndLogEx(INFO, "--- " _CYAN_("LTO Cartridge Information") " -----------------");
+        uint8_t d[512];
+#define READ_BLOCK(page, offset)                                                                   \
+    if (page + offset < 255)                                                                       \
+        ret_val = lto_rdbl(page + offset, d + (offset * 32), d + (offset * 32) + 16, verbose);     \
+    else                                                                                           \
+        ret_val = lto_rdbl_ext(page + offset, d + (offset * 32), d + (offset * 32) + 16, verbose); \
+    if (ret_val != PM3_SUCCESS) break;
 
-        // read block 0
-        uint8_t d00_d15[18];
-        uint8_t d16_d31[18];
-        if (lto_rdbl(0, d00_d15, d16_d31, verbose) == PM3_SUCCESS) {
-            uint8_t b0[32];
-            memcpy(b0, d00_d15, 16);
-            memcpy(b0 + 16, d16_d31, 16);
-            lto_print_ci(b0);
+        READ_BLOCK(0, 0);
+        {
+            PrintAndLogEx(NORMAL, "");
+            PrintAndLogEx(INFO, "--- " _CYAN_("LTO Cartridge Information") " ---------------------------");
+            PrintAndLogEx(INFO, "CM Serial number... " _YELLOW_("%u"), (bytes_to_num(d, 4) & 0x0FFFFFFF));
+            PrintAndLogEx(INFO, "Manufacture Id..... " _YELLOW_("%u"), (d[3] >> 4));
+            PrintAndLogEx(INFO, "CM Size............ " _YELLOW_("%u") " ( 1024 x %u bytes )", d[5], d[5]);
+            PrintAndLogEx(INFO, "Type............... " _YELLOW_("%s"), sprint_hex_inrow(d + 6, 2));
+            PrintAndLogEx(INFO, "Manufacture info... " _YELLOW_("%s"), sprint_hex_inrow(d + 8, 24));
         }
-        // read block 1
-        if (lto_rdbl(1, d00_d15, d16_d31, verbose) == PM3_SUCCESS) {
-            uint8_t b1[32];
-            memcpy(b1, d00_d15, 16);
-            memcpy(b1 + 16, d16_d31, 16);
-            lto_print_cmwi(b1);
-            lto_print_cmpt(b1 + 4);
+        enum LTO_PAGE {
+            UNK = 0,
+            MediaUsage_105,
+            Usage0_108,
+            ApplicationInfo,
+            // Usage1_109,
+            // Usage2_110,
+
+            END_PAGE
+        };
+        uint16_t page_offset[END_PAGE] = {0};
+
+        READ_BLOCK(1, 0);
+        {
+            uint16_t page_len = (d[2] << 8) | d[3];
+
+            PrintAndLogEx(NORMAL, "");
+            PrintAndLogEx(INFO, "--- " _CYAN_("LTO CM Protected Info") " -------------------------------");
+            PrintAndLogEx(INFO, "Raw (32 of %u)", page_len);
+            PrintAndLogEx(INFO, "   " _YELLOW_("%s"), sprint_hex_inrow(d, 32));
+            PrintAndLogEx(INFO, "                                                           ^^^^^^^^ CRC-32");
+            PrintAndLogEx(INFO, "Last write-inhibited block#... " _YELLOW_("%u"), d[0]);
+            PrintAndLogEx(INFO, "Block 1 protected flag........ %s", (d[1] == 0) ? _GREEN_("uninitialised cartridge") : (d[1] == 1) ? "initialised cartridge"
+                                                                                                                                    : "n/a");
+            PrintAndLogEx(INFO, "Reserved for future use....... " _YELLOW_("%s"), sprint_hex_inrow(d + 2, 2));
         }
+        {
+            uint16_t unprot_blk_offset = 0x100 / 32;
+            // Block Address:    B0 = integer part of [ (start address + offset) ÷ 32 ]
+            // Word Address:     w = mod(start address + offset, 32 ) ÷ 2
+            PrintAndLogEx(INFO, "--- " _CYAN_("Protected Page Descriptor Table") " ---------------------");
+            PrintAndLogEx(INFO, "------------------------------------------------------------------");
+            PrintAndLogEx(INFO, "                 start ");
+            PrintAndLogEx(INFO, "  # | ver | id  | address | name ");
+            PrintAndLogEx(INFO, "----+-----+-----+---------+----------------------------------------");
+            uint8_t p = 0;
+            for (uint8_t i = 0; i < 28; i += 4) {
+                uint8_t page_vs = d[i] >> 4;
+                uint16_t page_id = ((d[i] & 0x0F) << 8) | d[i + 1];
+                uint16_t sa = (d[i + 2] << 8 | d[i + 3]);
+                PrintAndLogEx(INFO, " %02u |  %u  | %03x | 0x%04X  | %s", p, page_vs, page_id, sa, get_page_name(page_id));
+
+                p++;
+                if (page_id == 0xFFF) {
+                    PrintAndLogEx(INFO, "---+-----+-----+---------+----------------------------------------");
+                    PrintAndLogEx(INFO, "# Protected Pages found...  %u", p);
+                    unprot_blk_offset = sa / 32;
+                    break;
+                }
+            }
+
+            READ_BLOCK(unprot_blk_offset, 0)
+            PrintAndLogEx(NORMAL, "");
+            PrintAndLogEx(INFO, "--- " _CYAN_("Unprotected Page Descriptor Table") " ---------------------");
+            uint16_t page_id = (d[0] << 8) | d[1];
+            uint16_t page_len = (d[2] << 8) | d[3];
+            PrintAndLogEx(INFO, "Page id..................... " _YELLOW_("0x%04x"), page_id);
+            PrintAndLogEx(INFO, "Page len.................... " _YELLOW_("%u"), page_len);
+            uint16_t unprot_blk_end = unprot_blk_offset + (((d[2] << 8) | d[3]) / 32);
+            PrintAndLogEx(INFO, "------------------------------------------------------------------");
+            PrintAndLogEx(INFO, "                 start ");
+            PrintAndLogEx(INFO, "  # | ver | id  | address | name ");
+            PrintAndLogEx(INFO, "-----+-----+-----+---------+----------------------------------------");
+            p = 0;
+            for (uint16_t unprot_blk = unprot_blk_offset + 1; unprot_blk < unprot_blk_end; unprot_blk++) {
+                for (uint8_t i = 0; i < 32; i += 4) {
+                    uint8_t page_vs = d[i] >> 4;
+                    page_id = ((d[i] & 0x0F) << 8) | d[i + 1];
+                    uint16_t sa = (d[i + 2] << 8 | d[i + 3]);
+                    PrintAndLogEx(INFO, " %02u |  %u  | %03x | 0x%04X  | %s", p, page_vs, page_id, sa, get_page_name(page_id));
+
+                    p++;
+                    switch (page_id) {
+                        case 0x105:
+                            page_offset[MediaUsage_105] = sa / 32;
+                            break;
+                        case 0x108:
+                            page_offset[Usage0_108] = sa / 32;
+                            break;
+                        case 0x200:
+                            page_offset[ApplicationInfo] = sa / 32;
+                            break;
+                    }
+                    if (page_id == 0xFFF) {
+                        PrintAndLogEx(INFO, "---+-----+-----+---------+----------------------------------------");
+                        PrintAndLogEx(INFO, "# Unprotected Pages found...  %u", p);
+                        goto end_outer_loop;
+                    }
+                }
+                READ_BLOCK(unprot_blk, 0)
+            }
+        }
+    end_outer_loop:
+
         // read block 2 - cartidge manufacture information
-        if (lto_rdbl(2, d00_d15, d16_d31, verbose) == PM3_SUCCESS) {
-            uint8_t b2_3[64];
-            memcpy(b2_3, d00_d15, 16);
-            memcpy(b2_3 + 16, d16_d31, 16);
+        READ_BLOCK(2, 0);
+        READ_BLOCK(2, 1);
+        uint8_t lto_info_idx = 0;
+        {
+            uint16_t page_len = (d[2] << 8) | d[3];
 
-            if (lto_rdbl(3, d00_d15, d16_d31, verbose) == PM3_SUCCESS) {
-                memcpy(b2_3 + 32, d00_d15, 16);
-                memcpy(b2_3 + 48, d16_d31, 16);
-                lto_print_cmi(b2_3);
+            char man[8 + 1];
+            memcpy(man, (char *)d + 4, 8);
+
+            char serial[10 + 1];
+            memcpy(serial, (char *)d + 12, 10);
+
+            uint16_t cart_type = (d[22] << 8) | d[23];
+            lto_info_idx = lto_get_info_by_type(cart_type);
+            char dom[8 + 1];
+            memcpy(dom, (char *)d + 24, 8);
+
+            uint16_t tape_len = (d[32] << 8) | d[33];
+            uint16_t tape_thick = (d[34] << 8) | d[35];
+            uint16_t empty_reel = (d[36] << 8) | d[37];
+            uint16_t hub_radius = (d[38] << 8) | d[39];
+            uint16_t full_reel = (d[40] << 8) | d[41];
+            uint16_t max_media_speed = (d[42] << 8) | d[43];
+            char lic[4 + 1];
+            memcpy(lic, (char *)d + 44, 4);
+
+            char cmuse[12 + 1];
+            memcpy(cmuse, (char *)d + 48, 12);
+
+            //    uint32_t crc = bytes_to_num(d+60, 4);
+
+            PrintAndLogEx(NORMAL, "");
+            PrintAndLogEx(INFO, "--- " _CYAN_("Cartridge Manufacturer's information") " --------------------------");
+            PrintAndLogEx(INFO, "Raw (64 of %u)", page_len);
+            PrintAndLogEx(INFO, "   " _YELLOW_("%s"), sprint_hex_inrow(d, 32));
+            PrintAndLogEx(INFO, "   " _YELLOW_("%s"), sprint_hex_inrow(d + 32, 32));
+            if (page_len == 64)
+                PrintAndLogEx(INFO, "                                                           ^^^^^^^^ CRC-32");
+            PrintAndLogEx(INFO, "Cartridge Manufacturer...... " _YELLOW_("%s"), man);
+            PrintAndLogEx(INFO, "Serial number............... " _YELLOW_("%s"), serial);
+            PrintAndLogEx(INFO, "Cartridge type.............. " _YELLOW_("%s%s (0x%02x)"), lto_info_table[lto_info_idx].Format, (cart_type >> 13 & 1) == 1 ? " WORM" : "", cart_type);
+            PrintAndLogEx(INFO, "Date of manufacture......... " _YELLOW_("%.8s"), dom);
+            PrintAndLogEx(INFO, "Tape len.................... " _YELLOW_("%um (%u)"), tape_len / 4, tape_len);
+            PrintAndLogEx(INFO, "Tape thickness.............. " _YELLOW_("%u"), tape_thick);
+            PrintAndLogEx(INFO, "Empty reel inertia.......... " _YELLOW_("%u") " %s", empty_reel, (empty_reel == 7270) ? "( def )" : "");
+            PrintAndLogEx(INFO, "Hub radius.................. " _YELLOW_("%u") " %s", hub_radius, (hub_radius == 22528) ? "( def )" : "");
+            PrintAndLogEx(INFO, "Full reel pack radius....... " _YELLOW_("%u") " / 0x%04x", full_reel, full_reel);
+            PrintAndLogEx(INFO, "Maximum media speed......... " _YELLOW_("%u"), max_media_speed);
+            PrintAndLogEx(INFO, "License code................ " _YELLOW_("%s"), lic);
+            PrintAndLogEx(INFO, "Cartridge manufacture use... " _YELLOW_("%s"), cmuse);
+        }
+
+        READ_BLOCK(4, 0);
+        READ_BLOCK(4, 1);
+        {
+            uint16_t page_len = (d[2] << 8) | d[3];
+
+            PrintAndLogEx(NORMAL, "");
+            PrintAndLogEx(INFO, "--- " _CYAN_("Media Manufacturer's information") " --------------------------");
+            PrintAndLogEx(INFO, "Raw (64 of %u)", page_len);
+            PrintAndLogEx(INFO, "   " _YELLOW_("%s"), sprint_hex_inrow(d, 32));
+            PrintAndLogEx(INFO, "   " _YELLOW_("%s"), sprint_hex_inrow(d + 32, 32));
+            if (page_len == 64)
+                PrintAndLogEx(INFO, "                                                           ^^^^^^^^ CRC-32");
+            // if (page_id != 0x)
+            // PrintAndLogEx(INFO, "Page id.................... " _YELLOW_("0x%04x"), page_id);
+            // PrintAndLogEx(INFO, "Page len................... " _YELLOW_("%u"), page_len);
+            PrintAndLogEx(INFO, "Servowriter Manufacturer... " _YELLOW_("%.48s"), d + 4);
+        }
+
+        // READ_BLOCK(page_offset[MediaUsage_105], 0)
+        // // READ_BLOCK(page_offset[MediaUsage_105]+1, 32)
+        // // READ_BLOCK(page_offset[MediaUsage_105]+2, 64)
+        // {
+        //     uint16_t page_len = (d[2] << 8) | d[3];
+        //
+        //     //    uint32_t crc = bytes_to_num(d+60, 4);
+        //
+        //     PrintAndLogEx(NORMAL, "");
+        //     PrintAndLogEx(INFO, "--- " _CYAN_("Cartridge Usage information") " ---------------------------");
+        //     PrintAndLogEx(INFO, "Raw (partial)");
+        //     PrintAndLogEx(INFO, "   " _YELLOW_("%s"), sprint_hex_inrow(d, 32));
+        //     // PrintAndLogEx(INFO, "   " _YELLOW_("%s"), sprint_hex_inrow(d + 32, 32));
+        //     // PrintAndLogEx(INFO, "   " _YELLOW_("%s"), sprint_hex_inrow(d + 64, 32));
+        //     PrintAndLogEx(INFO, "                                                           ^^^^^^^^ CRC-32");
+        //     PrintAndLogEx(INFO, "Page len.................... " _YELLOW_("%u"), page_len);
+        //     PrintAndLogEx(INFO, "Load Count.................. " _YELLOW_("%u"), bytes_to_num(d + 12, 4));
+        // }
+        if (lto_info_idx > 0 && lto_info_idx < ARRAYLEN(lto_info_table) - 1) {
+            READ_BLOCK(page_offset[Usage0_108], 0)
+            READ_BLOCK(page_offset[Usage0_108], 1)
+            // READ_BLOCK(page_offset[Usage0_108] + 2, 64)
+            {
+                uint16_t page_len = (d[2] << 8) | d[3];
+
+                PrintAndLogEx(NORMAL, "");
+                PrintAndLogEx(INFO, "--- " _CYAN_("Usage #0 information") " ----------------------------------");
+                PrintAndLogEx(INFO, "Raw (64 of %u)", page_len);
+                PrintAndLogEx(INFO, "   " _YELLOW_("%s"), sprint_hex_inrow(d, 32));
+                PrintAndLogEx(INFO, "   " _YELLOW_("%s"), sprint_hex_inrow(d + 32, 32));
+                if (page_len == 64)
+                    PrintAndLogEx(INFO, "                                                           ^^^^^^^^ CRC-32");
+                uint8_t start = lto_info_idx >= 5 ? 32 : 24;
+                uint64_t total_write_sets = bytes_to_num(d + start + 4, 8);
+                uint64_t total_read_sets = bytes_to_num(d + start + 12, 8);
+                PrintAndLogEx(INFO, "Load Count.................. " _YELLOW_("%u"), bytes_to_num(d + start, 4));
+                PrintAndLogEx(INFO, "Total Read.................. " _YELLOW_("%.3f TiB (%u sets)"), (double)(total_read_sets * lto_info_table[lto_info_idx].kBPerDataSet) / 1024 / 1024 / 1024, total_read_sets);
+                PrintAndLogEx(INFO, "Total Write................. " _YELLOW_("%.3f TiB (%u sets)"), (double)(total_write_sets * lto_info_table[lto_info_idx].kBPerDataSet) / 1024 / 1024 / 1024, total_write_sets);
+                double fve = (double)(total_write_sets + total_read_sets) / (double)(lto_info_table[lto_info_idx].nWraps * lto_info_table[lto_info_idx].setsPerWrap);
+                PrintAndLogEx(INFO, "Full volume equivalents..... " _YELLOW_("%.3f / %u PVE (%.3f%%)"), fve, lto_info_table[lto_info_idx].TapeLife, fve * 100 / lto_info_table[lto_info_idx].TapeLife);
+            }
+            if (page_offset[ApplicationInfo] != 0) {
+                READ_BLOCK(page_offset[ApplicationInfo], 0)
+                READ_BLOCK(page_offset[ApplicationInfo], 1)
+                READ_BLOCK(page_offset[ApplicationInfo], 2)
+                READ_BLOCK(page_offset[ApplicationInfo], 3)
+                READ_BLOCK(page_offset[ApplicationInfo], 4)
+                READ_BLOCK(page_offset[ApplicationInfo], 5)
+                READ_BLOCK(page_offset[ApplicationInfo], 6)
+                READ_BLOCK(page_offset[ApplicationInfo], 7)
+
+                uint16_t page_len = (d[2] << 8) | d[3];
+
+                PrintAndLogEx(NORMAL, "");
+                PrintAndLogEx(INFO, "--- " _CYAN_("Application information") " -------------------------------");
+                PrintAndLogEx(INFO, "Raw (64 of %u)", page_len);
+                PrintAndLogEx(INFO, "   " _YELLOW_("%s"), sprint_hex_inrow(d, 32));
+                PrintAndLogEx(INFO, "   " _YELLOW_("%s"), sprint_hex_inrow(d + 32, 32));
+                if (page_len == 64)
+                    PrintAndLogEx(INFO, "                                                           ^^^^^^^^ CRC-32");
+                for (uint16_t i = 10; i < 256;) {
+                    uint16_t attr_id = (d[i] << 8) | d[i + 1];
+                    uint16_t attr_len = (d[i + 2] << 8) | d[i + 3];
+                    if (attr_id == 0xFFF || attr_len == 0) {
+                        break;
+                    }
+                    switch (attr_id) {
+                        case 0x806:
+                            PrintAndLogEx(INFO, "Barcode..................... " _YELLOW_("%.7s"), d + i + 4);
+                            break;
+                        case 0x800:
+                            PrintAndLogEx(INFO, "LTFS Vendor................. " _YELLOW_("%.*s"), attr_len, d + i + 4);
+                            break;
+                        case 0x801:
+                            PrintAndLogEx(INFO, "LTFS Name................... " _YELLOW_("%.*s"), attr_len, d + i + 4);
+                            break;
+                        case 0x802:
+                            PrintAndLogEx(INFO, "LTFS Version................ " _YELLOW_("%.*s"), attr_len, d + i + 4);
+                            break;
+                            // default:
+                            //     PrintAndLogEx(INFO, _YELLOW_("%04x %.*s"), attr_id, attr_len, d + i + 4);
+                            //     break;
+                    }
+                    i += 4 + attr_len;
+                }
+                // uint8_t start = lto_info_idx >= 5 ? 32 : 24;
+                // uint64_t total_read_sets = bytes_to_num(d + start + 4, 8);
+                // uint64_t total_write_sets = bytes_to_num(d + start + 12, 8);
+                // PrintAndLogEx(INFO, "Load Count.................. " _YELLOW_("%u"), bytes_to_num(d + start, 4));
+                // PrintAndLogEx(INFO, "Total Read.................. " _YELLOW_("%.3f TiB (%u sets)"), (double)(total_read_sets * lto_info_table[lto_info_idx].kBPerDataSet) / 1024 / 1024 / 1024, total_read_sets);
+                // PrintAndLogEx(INFO, "Total Write................. " _YELLOW_("%.3f TiB (%u sets)"), (double)(total_write_sets * lto_info_table[lto_info_idx].kBPerDataSet) / 1024 / 1024 / 1024, total_write_sets);
+                // double fve = (double)(total_write_sets + total_read_sets) / (double)(lto_info_table[lto_info_idx].nWraps * lto_info_table[lto_info_idx].setsPerWrap);
+                // PrintAndLogEx(INFO, "Full volume equivalents..... " _YELLOW_("%.3f / %u PVE (%.3f%%)"), fve, lto_info_table[lto_info_idx].TapeLife, fve * 100 / lto_info_table[lto_info_idx].TapeLife);
             }
         }
 
-        if (lto_rdbl(4, d00_d15, d16_d31, verbose) == PM3_SUCCESS) {
-            uint8_t b2_3[64];
-            memcpy(b2_3, d00_d15, 16);
-            memcpy(b2_3 + 16, d16_d31, 16);
-
-            if (lto_rdbl(5, d00_d15, d16_d31, verbose) == PM3_SUCCESS) {
-                memcpy(b2_3 + 32, d00_d15, 16);
-                memcpy(b2_3 + 48, d16_d31, 16);
-                lto_print_mmi(b2_3);
-            }
-        }
+        break;
     }
-    PrintAndLogEx(NORMAL, "");
+    PrintAndLogEx(NORMAL, "Tag Read finished");
     lto_switch_off_field();
     return ret_val;
 }
