@@ -341,24 +341,24 @@ int reader_lto(bool loop, bool verbose) {
 }
 
 typedef struct lto_info_s {
-    char *Format;
+    const char *Format;
     uint32_t nWraps, setsPerWrap, tapeDirLength, kBPerDataSet, TapeLife;
 } lto_info_t;
 
 static lto_info_t lto_info_table[] = {
-    {"UNKNOWN"},
+    {"UNKNOWN",       -1,  -1,    -1, -1,   -1 },
     /* at_Offset = {24, 28, 36, 44, 48, 52, 54, 56, 58} */
-    {"LTO-1", 48, 5500, 16, 404, 260},
-    {"LTO-2", 64, 8200, 28, 404, 260},
-    {"LTO-3", 44, 6000, 32, 1617, 260},
-    {"LTO-4", 56, 9500, 32, 1590, 260},
+    {"LTO-1",         48,  5500,  16, 404,  260},
+    {"LTO-2",         64,  8200,  28, 404,  260},
+    {"LTO-3",         44,  6000,  32, 1617, 260},
+    {"LTO-4",         56,  9500,  32, 1590, 260},
     /* at_Offset = {32, 36, 44, 52, 56, 60, 62, 64, 66, 80} */
-    {"LTO-5", 80, 7800, 32, 2473, 260},
-    {"LTO-6", 136, 7805, 32, 2473, 130},
-    {"LTO-7", 112, 10950, 32, 5032, 130},
-    {"LTO-8", 208, 11660, 32, 5032, 75},
-    {"LTO-9", 280, 6770, 32, 9806, 55},
-    {"Cleaning Tape"}
+    {"LTO-5",         80,  7800,  32, 2473, 260},
+    {"LTO-6",         136, 7805,  32, 2473, 130},
+    {"LTO-7",         112, 10950, 32, 5032, 130},
+    {"LTO-8",         208, 11660, 32, 5032, 75 },
+    {"LTO-9",         280, 6770,  32, 9806, 55 },
+    {"Cleaning Tape", -1,  -1,    -1, -1,   -1 }
 };
 
 static uint8_t lto_get_info_by_type(uint16_t type) {
@@ -432,17 +432,31 @@ int infoLTO(bool verbose) {
             PrintAndLogEx(INFO, "Type............... " _YELLOW_("%s"), sprint_hex_inrow(d + 6, 2));
             PrintAndLogEx(INFO, "Manufacture info... " _YELLOW_("%s"), sprint_hex_inrow(d + 8, 24));
         }
-        enum LTO_PAGE {
-            UNK = 0,
-            MediaUsage_105,
-            Usage0_108,
-            ApplicationInfo,
-            // Usage1_109,
-            // Usage2_110,
+        uint16_t page_offset[0x101] = {0};
+#define _PageOffset(p) (p - 0x100)
+        enum LTO_WELLKNOWN_PAGES {
+            PageTapeDir = _PageOffset(0x103),
+            PageMediaUsage = _PageOffset(0x105),
+            PageUsage0 = _PageOffset(0x108),
+            PageUsage1 = _PageOffset(0x109),
+            PageUsage2 = _PageOffset(0x10A),
+            PageUsage3 = _PageOffset(0x10B),
+            PageAppInfo = _PageOffset(0x200)
 
-            END_PAGE
         };
-        uint16_t page_offset[END_PAGE] = {0};
+        // enum LTO_PAGE {
+        //     UNK = 0,
+        //     TapeDir_103,
+        //     MediaUsage_105,
+        //     Usage0_108,
+        //     Usage1_109,
+        //     Usage2_10A,
+        //     Usage3_10B,
+        //     ApplicationInfo,
+        //
+        //     END_PAGE
+        // };
+        // uint16_t page_offset[END_PAGE] = {0};
 
         READ_BLOCK(1, 0);
         {
@@ -475,6 +489,8 @@ int infoLTO(bool verbose) {
                 PrintAndLogEx(INFO, " %02u |  %u  | %03x | 0x%04X  | %s", p, page_vs, page_id, sa, get_page_name(page_id));
 
                 p++;
+                if (page_id >= 0x100 && page_id <= 0x200)
+                    page_offset[page_id - 0x100] = sa / 32;
                 if (page_id == 0xFFF) {
                     PrintAndLogEx(INFO, "---+-----+-----+---------+----------------------------------------");
                     PrintAndLogEx(INFO, "# Protected Pages found...  %u", p);
@@ -504,17 +520,8 @@ int infoLTO(bool verbose) {
                     PrintAndLogEx(INFO, " %02u |  %u  | %03x | 0x%04X  | %s", p, page_vs, page_id, sa, get_page_name(page_id));
 
                     p++;
-                    switch (page_id) {
-                        case 0x105:
-                            page_offset[MediaUsage_105] = sa / 32;
-                            break;
-                        case 0x108:
-                            page_offset[Usage0_108] = sa / 32;
-                            break;
-                        case 0x200:
-                            page_offset[ApplicationInfo] = sa / 32;
-                            break;
-                    }
+                    if (page_id >= 0x100 && page_id <= 0x200)
+                        page_offset[page_id - 0x100] = sa / 32;
                     if (page_id == 0xFFF) {
                         PrintAndLogEx(INFO, "---+-----+-----+---------+----------------------------------------");
                         PrintAndLogEx(INFO, "# Unprotected Pages found...  %u", p);
@@ -616,47 +623,78 @@ int infoLTO(bool verbose) {
         //     PrintAndLogEx(INFO, "Load Count.................. " _YELLOW_("%u"), bytes_to_num(d + 12, 4));
         // }
         if (lto_info_idx > 0 && lto_info_idx < ARRAYLEN(lto_info_table) - 1) {
-            READ_BLOCK(page_offset[Usage0_108], 0)
-            READ_BLOCK(page_offset[Usage0_108], 1)
-            // READ_BLOCK(page_offset[Usage0_108] + 2, 64)
-            {
+            if (page_offset[PageTapeDir] != 0) {  // TapeDir
+                READ_BLOCK(page_offset[PageTapeDir], 0)
                 uint16_t page_len = (d[2] << 8) | d[3];
 
                 PrintAndLogEx(NORMAL, "");
-                PrintAndLogEx(INFO, "--- " _CYAN_("Usage #0 information") " ----------------------------------");
-                PrintAndLogEx(INFO, "Raw (64 of %u)", page_len);
-                PrintAndLogEx(INFO, "   " _YELLOW_("%s"), sprint_hex_inrow(d, 32));
-                PrintAndLogEx(INFO, "   " _YELLOW_("%s"), sprint_hex_inrow(d + 32, 32));
-                if (page_len == 64)
-                    PrintAndLogEx(INFO, "                                                           ^^^^^^^^ CRC-32");
-                uint8_t start = lto_info_idx >= 5 ? 32 : 24;
-                uint64_t total_write_sets = bytes_to_num(d + start + 4, 8);
-                uint64_t total_read_sets = bytes_to_num(d + start + 12, 8);
-                PrintAndLogEx(INFO, "Load Count.................. " _YELLOW_("%u"), bytes_to_num(d + start, 4));
-                PrintAndLogEx(INFO, "Total Read.................. " _YELLOW_("%.3f TiB (%u sets)"), (double)(total_read_sets * lto_info_table[lto_info_idx].kBPerDataSet) / 1024 / 1024 / 1024, total_read_sets);
-                PrintAndLogEx(INFO, "Total Write................. " _YELLOW_("%.3f TiB (%u sets)"), (double)(total_write_sets * lto_info_table[lto_info_idx].kBPerDataSet) / 1024 / 1024 / 1024, total_write_sets);
-                double fve = (double)(total_write_sets + total_read_sets) / (double)(lto_info_table[lto_info_idx].nWraps * lto_info_table[lto_info_idx].setsPerWrap);
-                PrintAndLogEx(INFO, "Full volume equivalents..... " _YELLOW_("%.3f / %u PVE (%.3f%%)"), fve, lto_info_table[lto_info_idx].TapeLife, fve * 100 / lto_info_table[lto_info_idx].TapeLife);
+                PrintAndLogEx(INFO, "--- " _CYAN_("Tape Directory") " ----------------------- %dBytes", page_len);
+                // switch (lto_info_idx) {
+                //     case
+                // }
             }
-            if (page_offset[ApplicationInfo] != 0) {
-                READ_BLOCK(page_offset[ApplicationInfo], 0)
-                READ_BLOCK(page_offset[ApplicationInfo], 1)
-                READ_BLOCK(page_offset[ApplicationInfo], 2)
-                READ_BLOCK(page_offset[ApplicationInfo], 3)
-                READ_BLOCK(page_offset[ApplicationInfo], 4)
-                READ_BLOCK(page_offset[ApplicationInfo], 5)
-                READ_BLOCK(page_offset[ApplicationInfo], 6)
-                READ_BLOCK(page_offset[ApplicationInfo], 7)
+
+            {
+                uint64_t total_write_sets, total_read_sets;
+                const uint8_t start = lto_info_idx >= 5 ? 32 : 24;
+                // uint64_t total_write_sets = bytes_to_num(d + start + 4, 8);
+                // uint64_t total_read_sets = bytes_to_num(d + start + 12, 8);
+                uint8_t latestPage = 0;
+                int32_t maxLoadCount = -1;
+                if (lto_info_idx >= 5) {
+                    for (uint16_t o = 0; o < 4; o++) {
+                        READ_BLOCK(page_offset[PageUsage0 + o], 1);  // TODO reuse buffer for faster read
+                        int32_t thisLoadCount = bytes_to_num(d + start, 4);
+                        PrintAndLogEx(INFO, "#%d " _YELLOW_("%s"), o, sprint_hex_inrow(d + 32, 32));
+                        if (thisLoadCount >= maxLoadCount) {
+                            latestPage = o;
+                            maxLoadCount = thisLoadCount;
+                        }
+                    }
+                    PrintAndLogEx(INFO, "   ^^^^^^^^ Load Count [#%d is Latest]", latestPage);
+                    if (latestPage != 3) {
+                        READ_BLOCK(page_offset[PageUsage0 + latestPage], 1);  // TODO reuse buffer for faster read
+                    }
+                    total_write_sets = bytes_to_num(d + start + 4, 8);
+                    total_read_sets = bytes_to_num(d + start + 12, 8);
+                } else {
+                    for (uint16_t o = 0; o < 4; o++) {
+                        READ_BLOCK(page_offset[PageUsage0 + o], 0);  // TODO reuse buffer for faster read
+                        int32_t thisLoadCount = bytes_to_num(d + start, 4);
+                        PrintAndLogEx(INFO, "#%d " _YELLOW_("%s"), o, sprint_hex_inrow(d, 32));
+                        if (thisLoadCount >= maxLoadCount) {
+                            latestPage = o;
+                            maxLoadCount = thisLoadCount;
+                        }
+                    }
+                    // PrintAndLogEx(INFO, "   ^^^^^^^^ Load Count [#%d is Latest]", latestPage);
+                    if (latestPage != 3) {
+                        READ_BLOCK(page_offset[PageUsage0 + latestPage], 1);  // TODO reuse buffer for faster read
+                    }
+                    READ_BLOCK(page_offset[PageUsage0 + latestPage], 0);
+                    total_write_sets = bytes_to_num(d + start + 4, 8);
+                    total_read_sets = bytes_to_num(d + start + 12, 8);
+                }
+                PrintAndLogEx(INFO, "Load Count.................. " _YELLOW_("%d"), bytes_to_num(d + start, 4));
+                PrintAndLogEx(INFO, "Total Write................. " _YELLOW_("%.3f TiB (%u sets)"), (double)(total_write_sets * lto_info_table[lto_info_idx].kBPerDataSet) / 1024 / 1024 / 1024, total_write_sets);
+                PrintAndLogEx(INFO, "Total Read.................. " _YELLOW_("%.3f TiB (%u sets)"), (double)(total_read_sets * lto_info_table[lto_info_idx].kBPerDataSet) / 1024 / 1024 / 1024, total_read_sets);
+                double fve = (double)(total_write_sets + total_read_sets) / (double)(lto_info_table[lto_info_idx].nWraps * lto_info_table[lto_info_idx].setsPerWrap);
+                PrintAndLogEx(INFO, "Full volume equivalents..... " _YELLOW_("%.3f / %u FVE (%.3f%%)"), fve, lto_info_table[lto_info_idx].TapeLife, fve * 100 / lto_info_table[lto_info_idx].TapeLife);
+            }
+            if (page_offset[PageAppInfo] != 0) {
+                READ_BLOCK(page_offset[PageAppInfo], 0)
+                READ_BLOCK(page_offset[PageAppInfo], 1)
+                READ_BLOCK(page_offset[PageAppInfo], 2)
+                READ_BLOCK(page_offset[PageAppInfo], 3)
+                READ_BLOCK(page_offset[PageAppInfo], 4)
+                READ_BLOCK(page_offset[PageAppInfo], 5)
+                READ_BLOCK(page_offset[PageAppInfo], 6)
+                READ_BLOCK(page_offset[PageAppInfo], 7)
 
                 uint16_t page_len = (d[2] << 8) | d[3];
 
                 PrintAndLogEx(NORMAL, "");
-                PrintAndLogEx(INFO, "--- " _CYAN_("Application information") " -------------------------------");
-                PrintAndLogEx(INFO, "Raw (64 of %u)", page_len);
-                PrintAndLogEx(INFO, "   " _YELLOW_("%s"), sprint_hex_inrow(d, 32));
-                PrintAndLogEx(INFO, "   " _YELLOW_("%s"), sprint_hex_inrow(d + 32, 32));
-                if (page_len == 64)
-                    PrintAndLogEx(INFO, "                                                           ^^^^^^^^ CRC-32");
+                PrintAndLogEx(INFO, "--- " _CYAN_("Application Specific") " -------------------- %dBytes", page_len);
                 for (uint16_t i = 10; i < 256;) {
                     uint16_t attr_id = (d[i] << 8) | d[i + 1];
                     uint16_t attr_len = (d[i + 2] << 8) | d[i + 3];
@@ -682,14 +720,6 @@ int infoLTO(bool verbose) {
                     }
                     i += 4 + attr_len;
                 }
-                // uint8_t start = lto_info_idx >= 5 ? 32 : 24;
-                // uint64_t total_read_sets = bytes_to_num(d + start + 4, 8);
-                // uint64_t total_write_sets = bytes_to_num(d + start + 12, 8);
-                // PrintAndLogEx(INFO, "Load Count.................. " _YELLOW_("%u"), bytes_to_num(d + start, 4));
-                // PrintAndLogEx(INFO, "Total Read.................. " _YELLOW_("%.3f TiB (%u sets)"), (double)(total_read_sets * lto_info_table[lto_info_idx].kBPerDataSet) / 1024 / 1024 / 1024, total_read_sets);
-                // PrintAndLogEx(INFO, "Total Write................. " _YELLOW_("%.3f TiB (%u sets)"), (double)(total_write_sets * lto_info_table[lto_info_idx].kBPerDataSet) / 1024 / 1024 / 1024, total_write_sets);
-                // double fve = (double)(total_write_sets + total_read_sets) / (double)(lto_info_table[lto_info_idx].nWraps * lto_info_table[lto_info_idx].setsPerWrap);
-                // PrintAndLogEx(INFO, "Full volume equivalents..... " _YELLOW_("%.3f / %u PVE (%.3f%%)"), fve, lto_info_table[lto_info_idx].TapeLife, fve * 100 / lto_info_table[lto_info_idx].TapeLife);
             }
         }
 
@@ -699,7 +729,6 @@ int infoLTO(bool verbose) {
     lto_switch_off_field();
     return ret_val;
 }
-
 static int CmdHfLTOList(const char *Cmd) {
     return CmdTraceListAlias(Cmd, "hf lto", "lto -c");
 }
